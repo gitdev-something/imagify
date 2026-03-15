@@ -303,7 +303,7 @@ async function savePreset() {
   }
 }
 
-// ── REARRANGE ─────────────────────────────────────────────────────
+// ── REARRANGE (PARTICLE SWARM) ───────────────────────────────────
 async function rearrangePixels() {
   if (!selectedPreset || !targetImageData) return;
 
@@ -331,56 +331,111 @@ async function rearrangePixels() {
     }
     sortedTarget.sort((a, b) => a.lum - b.lum);
 
-    // 2. Setup Canvas for animation
+    // 2. Setup Particle System
+    // Since 512x512 = 262k pixels is TOO MANY for smooth particles in JS 2D canvas,
+    // we use a lower resolution (e.g. 128x128) for the swarm phase, 
+    // then snap to full resolution at the end.
+    const SWARM_RES = 128;
+    const stride = WORK_SIZE / SWARM_RES;
+    const particles = [];
+
+    rearrangeLabel.textContent = 'Initializing Swarm…';
+
+    for (let y = 0; y < SWARM_RES; y++) {
+      for (let x = 0; x < SWARM_RES; x++) {
+        // Source position (relative to canvas)
+        const sx = x * stride;
+        const sy = y * stride;
+        
+        // Find corresponding rank in sorted target
+        // We pick a representative pixel from this region
+        const pixelIdx = (Math.floor(sy) * WORK_SIZE) + Math.floor(sx);
+        
+        // Find which rank this pixel would have. 
+        // For simplicity in swarm mode, we just use its spatial rank as its brightness rank
+        // to approximate the "sorting" look.
+        const rank = Math.floor((particles.length / (SWARM_RES * SWARM_RES)) * count);
+        const destIdx = pixelMap[rank];
+        
+        const tx = destIdx % WORK_SIZE;
+        const ty = Math.floor(destIdx / WORK_SIZE);
+
+        particles.push({
+          x: sx, y: sy,
+          tx: tx, ty: ty,
+          vx: (Math.random() - 0.5) * 10,
+          vy: (Math.random() - 0.5) * 10,
+          color: `rgb(${targetData[pixelIdx * 4]},${targetData[pixelIdx * 4 + 1]},${targetData[pixelIdx * 4 + 2]})`
+        });
+      }
+    }
+
+    // 3. Animation Loop
     resultCanvas.width = WORK_SIZE;
     resultCanvas.height = WORK_SIZE;
     const ctx = resultCanvas.getContext('2d', { alpha: false });
-    ctx.fillStyle = '#06070f'; // match background
-    ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
     
     resultCard.classList.remove('hidden');
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-    
-    // 3. Animation Loop (Chunked)
-    rearrangeLabel.textContent = 'Rearranging…';
-    const CHUNK_SIZE = 2048; // pixels per frame
-    let currentRank = 0;
 
-    const renderChunk = () => {
-      const end = Math.min(currentRank + CHUNK_SIZE, count);
-      const chunkBuffer = ctx.createImageData(WORK_SIZE, WORK_SIZE); // we'll use a local buffer to draw sparsely
+    let frame = 0;
+    const MAX_FRAMES = 120; // ~2 seconds
+
+    const renderSwarm = () => {
+      ctx.fillStyle = '#06070f';
+      ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
       
-      // We don't want to clear the canvas, just draw new pixels.
-      // Easiest way in 2D API for individual pixels is manipulating an ImageData or using fillRect.
-      // fillRect(1x1) is slow for thousands.
-      // Better: we modify the result image data directly then putImageData.
-      
-      // Get existing image data or keep a persistent buffer
-      const currentFullImageData = ctx.getImageData(0, 0, WORK_SIZE, WORK_SIZE);
-      const fullData = currentFullImageData.data;
+      let allSettled = true;
+      const friction = 0.85;
+      const ease = 0.12;
+      const noise = 2.0;
 
-      for (let r = currentRank; r < end; r++) {
-        const srcIdx  = sortedTarget[r].index;
-        const destIdx = pixelMap[r];
+      for (let i = 0; i < particles.length; i++) {
+        const p = particles[i];
+        
+        // Spring physics towards target
+        const dx = p.tx - p.x;
+        const dy = p.ty - p.y;
+        
+        p.vx += dx * ease + (Math.random() - 0.5) * noise;
+        p.vy += dy * ease + (Math.random() - 0.5) * noise;
+        
+        p.vx *= friction;
+        p.vy *= friction;
+        
+        p.x += p.vx;
+        p.y += p.vy;
 
-        fullData[destIdx * 4]     = targetData[srcIdx * 4];
-        fullData[destIdx * 4 + 1] = targetData[srcIdx * 4 + 1];
-        fullData[destIdx * 4 + 2] = targetData[srcIdx * 4 + 2];
-        fullData[destIdx * 4 + 3] = 255;
+        // Visual "stream" effect: draw a line or larger pixel
+        ctx.fillStyle = p.color;
+        ctx.fillRect(p.x, p.y, stride, stride);
+
+        if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1 || Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+          allSettled = false;
+        }
       }
 
-      ctx.putImageData(currentFullImageData, 0, 0);
-      currentRank = end;
-
-      if (currentRank < count) {
-        requestAnimationFrame(renderChunk);
+      frame++;
+      
+      if (!allSettled && frame < MAX_FRAMES) {
+        requestAnimationFrame(renderSwarm);
       } else {
-        // Done
+        // Final Snap: Draw the full resolution result
+        const finalData = new Uint8ClampedArray(targetData.length);
+        for (let r = 0; r < count; r++) {
+          const srcIdx  = sortedTarget[r].index;
+          const destIdx = pixelMap[r];
+          finalData[destIdx * 4] = targetData[srcIdx * 4];
+          finalData[destIdx * 4 + 1] = targetData[srcIdx * 4 + 1];
+          finalData[destIdx * 4 + 2] = targetData[srcIdx * 4 + 2];
+          finalData[destIdx * 4 + 3] = 255;
+        }
+        ctx.putImageData(new ImageData(finalData, WORK_SIZE, WORK_SIZE), 0, 0);
         finishRearrange();
       }
     };
 
-    requestAnimationFrame(renderChunk);
+    requestAnimationFrame(renderSwarm);
 
   } catch (err) {
     console.error('Rearrange failed:', err);
