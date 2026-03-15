@@ -363,13 +363,13 @@ async function rearrangePixels() {
     }
 
     // 3. Simulation Constants (tuned to Obamify values)
-    const MAX_VELOCITY = 8.0;
+    const MAX_VELOCITY = 10.0;
     const PERSONAL_SPACE = stride * 0.95;
     const ALIGNMENT_FACTOR = 0.8;
     const FRICTION = 0.96;
-    const MAX_FRAMES = 140;
+    const MAX_FRAMES = 240; // Increased to 4 seconds
 
-    const factorCurve = (x) => Math.min(1000, x * x * x);
+    const factorCurve = (x) => Math.min(2000, x * x * x * 2);
 
     // 4. Animation Loop
     resultCanvas.width = WORK_SIZE;
@@ -435,8 +435,10 @@ async function rearrangePixels() {
               
               if(ndist > 0 && ndist < PERSONAL_SPACE) {
                 const weight = (1.0 / ndist) * (PERSONAL_SPACE - ndist) / PERSONAL_SPACE;
-                p.ax -= ndx * weight * 0.5;
-                p.ay -= ndy * weight * 0.5;
+                // Reduce avoidance force as we progress to favor convergence
+                const avoidanceStrength = Math.max(0.1, 0.6 * (1 - progress));
+                p.ax -= ndx * weight * avoidanceStrength;
+                p.ay -= ndy * weight * avoidanceStrength;
                 avg_xvel += other.vx * weight;
                 avg_yvel += other.vy * weight;
                 count += weight;
@@ -473,15 +475,17 @@ async function rearrangePixels() {
         ctx.fillStyle = p.color;
         ctx.fillRect(p.x - stride/2, p.y - stride/2, stride * 1.2, stride * 1.2);
 
-        if (dist > 1.0 || speed > 0.1) allSettled = false;
+        if (dist > 1.5 || speed > 0.2) allSettled = false;
       }
 
       frame++;
       
-      if (!allSettled && frame < MAX_FRAMES) {
+      const isFinishing = (frame > MAX_FRAMES - 30); // Last half second
+
+      if (!allSettled && frame < MAX_FRAMES && !isFinishing) {
         requestAnimationFrame(renderSim);
       } else {
-        // High-Res Snap
+        // High-Res Phase (Transition)
         const finalData = new Uint8ClampedArray(targetData.length);
         for (let r = 0; r < count; r++) {
           const srcIdx  = sortedTarget[r].index;
@@ -491,8 +495,43 @@ async function rearrangePixels() {
           finalData[destIdx * 4 + 2] = targetData[srcIdx * 4 + 2];
           finalData[destIdx * 4 + 3] = 255;
         }
-        ctx.putImageData(new ImageData(finalData, WORK_SIZE, WORK_SIZE), 0, 0);
-        finishRearrange();
+
+        // Final Transition: Fade in the high-res image
+        let fadeFrame = 0;
+        const FADE_DURATION = 20;
+
+        const renderFade = () => {
+          const alpha = fadeFrame / FADE_DURATION;
+          ctx.globalAlpha = 1.0;
+          ctx.fillStyle = '#06070f';
+          ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
+          
+          // Draw settling particles (fading out)
+          ctx.globalAlpha = 1 - alpha;
+          for (let p of particles) {
+            ctx.fillStyle = p.color;
+            ctx.fillRect(p.x - stride/2, p.y - stride/2, stride * 1.2, stride * 1.2);
+          }
+
+          // Draw high-res snap (fading in)
+          ctx.globalAlpha = alpha;
+          const tempCanvas = document.createElement('canvas');
+          tempCanvas.width = WORK_SIZE;
+          tempCanvas.height = WORK_SIZE;
+          tempCanvas.getContext('2d').putImageData(new ImageData(finalData, WORK_SIZE, WORK_SIZE), 0, 0);
+          ctx.drawImage(tempCanvas, 0, 0);
+
+          fadeFrame++;
+          if (fadeFrame <= FADE_DURATION) {
+            requestAnimationFrame(renderFade);
+          } else {
+            ctx.globalAlpha = 1.0;
+            ctx.putImageData(new ImageData(finalData, WORK_SIZE, WORK_SIZE), 0, 0);
+            finishRearrange();
+          }
+        };
+
+        requestAnimationFrame(renderFade);
       }
     };
 
