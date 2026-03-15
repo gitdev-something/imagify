@@ -303,13 +303,13 @@ async function savePreset() {
   }
 }
 
-// ── REARRANGE (ADVANCED FLUID SWARM) ────────────────────────────
+// ── REARRANGE (SMOOTH MIGRATION) ────────────────────────────────
 async function rearrangePixels() {
   if (!selectedPreset || !targetImageData) return;
 
   // Show spinner / Disable UI
   spinner.classList.remove('hidden');
-  rearrangeLabel.textContent = 'Analyzing…';
+  rearrangeLabel.textContent = 'Mapping…';
   rearrangeBtn.disabled = true;
   downloadBtn.disabled = true;
 
@@ -331,13 +331,12 @@ async function rearrangePixels() {
     }
     sortedTarget.sort((a, b) => a.lum - b.lum);
 
-    // 2. Setup Particle System (High Density)
-    // We use a resolution that balances density and performance
+    // 2. Setup Particle System (Smooth Migration)
     const SWARM_RES = 160; 
     const stride = WORK_SIZE / SWARM_RES;
     const particles = [];
 
-    rearrangeLabel.textContent = 'Simulating Swarm…';
+    rearrangeLabel.textContent = 'Migrating Pixels…';
 
     for (let y = 0; y < SWARM_RES; y++) {
       for (let x = 0; x < SWARM_RES; x++) {
@@ -352,17 +351,10 @@ async function rearrangePixels() {
         const tx = destIdx % WORK_SIZE;
         const ty = Math.floor(destIdx / WORK_SIZE);
 
-        // Initial "Burst" velocity based on distance from center
-        const cx = WORK_SIZE / 2;
-        const cy = WORK_SIZE / 2;
-        const angle = Math.atan2(sy - cy, sx - cx);
-        const mag = 5 + Math.random() * 8;
-
         particles.push({
-          x: sx, y: sy,
-          tx: tx, ty: ty,
-          vx: Math.cos(angle) * mag + (Math.random() - 0.5) * 5,
-          vy: Math.sin(angle) * mag + (Math.random() - 0.5) * 5,
+          x: sx, y: sy,      // Start exactly at source
+          tx: tx, ty: ty,   // Target preset position
+          vx: 0, vy: 0,     // Start at rest (no burst)
           color: `rgb(${targetData[pixelIdx * 4]},${targetData[pixelIdx * 4 + 1]},${targetData[pixelIdx * 4 + 2]})`
         });
       }
@@ -379,29 +371,28 @@ async function rearrangePixels() {
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
     let frame = 0;
-    const MAX_FRAMES = 110; 
+    const MAX_FRAMES = 90; 
 
-    const renderSwarm = () => {
-      // Fade background for trails
-      ctx.fillStyle = 'rgba(6, 7, 15, 0.25)';
+    const renderMigration = () => {
+      // Background fade for soft trails
+      ctx.fillStyle = 'rgba(6, 7, 15, 0.2)';
       ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
       
       let allSettled = true;
       const progress = frame / MAX_FRAMES;
       
-      // Dynamic physics constants based on progress
-      const friction = 0.88;
-      const spring   = 0.04 + (progress * 0.15); // attraction gets stronger over time
-      const noise    = Math.max(0, 4.0 * (1 - progress * 1.5)); // turbulence fades out
+      // Migration physics (no burst, smooth convergence)
+      const friction = 0.82;
+      const spring   = 0.05 + (progress * 0.2); // stronger pull as we near the end
+      const noise    = Math.max(0, 1.5 * (1 - progress)); // subtle turbulence to avoid straight lines
 
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
         
-        // Attraction force
         const dx = p.tx - p.x;
         const dy = p.ty - p.y;
         
-        // Apply physics
+        // Smooth attraction
         p.vx += dx * spring + (Math.random() - 0.5) * noise;
         p.vy += dy * spring + (Math.random() - 0.5) * noise;
         
@@ -411,9 +402,10 @@ async function rearrangePixels() {
         p.x += p.vx;
         p.y += p.vy;
 
-        // Draw particle
         ctx.fillStyle = p.color;
-        ctx.fillRect(p.x, p.y, stride * 1.5, stride * 1.5);
+        // Particles grow slightly as they arrive
+        const size = stride * (1 + progress * 0.5);
+        ctx.fillRect(p.x, p.y, size, size);
 
         if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
           allSettled = false;
@@ -423,9 +415,9 @@ async function rearrangePixels() {
       frame++;
       
       if (!allSettled && frame < MAX_FRAMES) {
-        requestAnimationFrame(renderSwarm);
+        requestAnimationFrame(renderMigration);
       } else {
-        // Final High-Res Snap
+        // 4. Final High-Res Snap (with fade-in)
         const finalData = new Uint8ClampedArray(targetData.length);
         for (let r = 0; r < count; r++) {
           const srcIdx  = sortedTarget[r].index;
@@ -435,12 +427,14 @@ async function rearrangePixels() {
           finalData[destIdx * 4 + 2] = targetData[srcIdx * 4 + 2];
           finalData[destIdx * 4 + 3] = 255;
         }
+
+        // Draw the final high-res result
         ctx.putImageData(new ImageData(finalData, WORK_SIZE, WORK_SIZE), 0, 0);
         finishRearrange();
       }
     };
 
-    requestAnimationFrame(renderSwarm);
+    requestAnimationFrame(renderMigration);
 
   } catch (err) {
     console.error('Rearrange failed:', err);
