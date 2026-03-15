@@ -303,7 +303,7 @@ async function savePreset() {
   }
 }
 
-// ── REARRANGE (SMOOTH MIGRATION) ────────────────────────────────
+// ── REARRANGE (OBAMIFY STEERING PHYSICS) ────────────────────────
 async function rearrangePixels() {
   if (!selectedPreset || !targetImageData) return;
 
@@ -331,93 +331,157 @@ async function rearrangePixels() {
     }
     sortedTarget.sort((a, b) => a.lum - b.lum);
 
-    // 2. Setup Particle System (Smooth Migration)
-    const SWARM_RES = 160; 
+    // 2. Setup Particle System (Steering Physics)
+    // Resolution for steering needs to be lower than swarm for performance 
+    // because of neighbor checks (O(N^2) or grid-optimized).
+    const SWARM_RES = 112; 
+    const gridCount = SWARM_RES * SWARM_RES;
     const stride = WORK_SIZE / SWARM_RES;
     const particles = [];
 
-    rearrangeLabel.textContent = 'Migrating Pixels…';
+    rearrangeLabel.textContent = 'Simulating Physics…';
 
     for (let y = 0; y < SWARM_RES; y++) {
       for (let x = 0; x < SWARM_RES; x++) {
-        const sx = x * stride;
-        const sy = y * stride;
+        const sx = x * stride + stride/2;
+        const sy = y * stride + stride/2;
         const pixelIdx = (Math.floor(sy) * WORK_SIZE) + Math.floor(sx);
         
-        // Find which rank this pixel matches
-        const rank = Math.floor((particles.length / (SWARM_RES * SWARM_RES)) * count);
+        const rank = Math.floor((particles.length / gridCount) * count);
         const destIdx = pixelMap[rank];
         
-        const tx = destIdx % WORK_SIZE;
-        const ty = Math.floor(destIdx / WORK_SIZE);
-
         particles.push({
-          x: sx, y: sy,      // Start exactly at source
-          tx: tx, ty: ty,   // Target preset position
-          vx: 0, vy: 0,     // Start at rest (no burst)
+          x: sx, y: sy,
+          tx: (destIdx % WORK_SIZE),
+          ty: Math.floor(destIdx / WORK_SIZE),
+          vx: 0, vy: 0,
+          ax: 0, ay: 0,
+          age: 0,
           color: `rgb(${targetData[pixelIdx * 4]},${targetData[pixelIdx * 4 + 1]},${targetData[pixelIdx * 4 + 2]})`
         });
       }
     }
 
-    // 3. Animation Loop
+    // 3. Simulation Constants (tuned to Obamify values)
+    const MAX_VELOCITY = 8.0;
+    const PERSONAL_SPACE = stride * 0.95;
+    const ALIGNMENT_FACTOR = 0.8;
+    const FRICTION = 0.96;
+    const MAX_FRAMES = 140;
+
+    const factorCurve = (x) => Math.min(1000, x * x * x);
+
+    // 4. Animation Loop
     resultCanvas.width = WORK_SIZE;
     resultCanvas.height = WORK_SIZE;
     const ctx = resultCanvas.getContext('2d', { alpha: false });
-    ctx.fillStyle = '#06070f';
-    ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
     
     resultCard.classList.remove('hidden');
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
     let frame = 0;
-    const MAX_FRAMES = 90; 
-
-    const renderMigration = () => {
-      // Background fade for soft trails
-      ctx.fillStyle = 'rgba(6, 7, 15, 0.2)';
+    const renderSim = () => {
+      // Background trails
+      ctx.fillStyle = 'rgba(6, 7, 15, 0.3)';
       ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
       
+      const elapsed = frame / 60;
       let allSettled = true;
-      const progress = frame / MAX_FRAMES;
-      
-      // Migration physics (no burst, smooth convergence)
-      const friction = 0.82;
-      const spring   = 0.05 + (progress * 0.2); // stronger pull as we near the end
-      const noise    = Math.max(0, 1.5 * (1 - progress)); // subtle turbulence to avoid straight lines
+
+      // Spatial Grid for neighbor checks
+      const gridSize = SWARM_RES;
+      const spatialGrid = new Array(gridSize * gridSize);
+      for(let i=0; i<particles.length; i++) {
+        const p = particles[i];
+        const gx = Math.floor(p.x / stride).clamp(0, gridSize-1);
+        const gy = Math.floor(p.y / stride).clamp(0, gridSize-1);
+        const gidx = gy * gridSize + gx;
+        if(!spatialGrid[gidx]) spatialGrid[gidx] = [];
+        spatialGrid[gidx].push(i);
+      }
 
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
-        
+        p.ax = 0; p.ay = 0;
+
+        // Force 1: Target Attraction (Destination Force)
         const dx = p.tx - p.x;
         const dy = p.ty - p.y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        const factor = factorCurve(elapsed * 0.5); // ramp up attraction
+        p.ax += (dx * dist * factor) / WORK_SIZE * 0.01;
+        p.ay += (dy * dist * factor) / WORK_SIZE * 0.01;
+
+        // Force 2: Personal Space (Neighbor Avoidance)
+        const gx = Math.floor(p.x / stride).clamp(0, gridSize-1);
+        const gy = Math.floor(p.y / stride).clamp(0, gridSize-1);
         
-        // Smooth attraction
-        p.vx += dx * spring + (Math.random() - 0.5) * noise;
-        p.vy += dy * spring + (Math.random() - 0.5) * noise;
+        let avg_xvel = 0, avg_yvel = 0, count = 0;
+
+        for(let ny = -1; ny <= 1; ny++) {
+          for(let nx = -1; nx <= 1; nx++) {
+            const ngx = gx + nx;
+            const ngy = gy + ny;
+            if(ngx < 0 || ngx >= gridSize || ngy < 0 || ngy >= gridSize) continue;
+            const neighbors = spatialGrid[ngy * gridSize + ngx];
+            if(!neighbors) continue;
+
+            for(const nIdx of neighbors) {
+              if(nIdx === i) continue;
+              const other = particles[nIdx];
+              const ndx = other.x - p.x;
+              const ndy = other.y - p.y;
+              const ndist = Math.sqrt(ndx * ndx + ndy * ndy);
+              
+              if(ndist > 0 && ndist < PERSONAL_SPACE) {
+                const weight = (1.0 / ndist) * (PERSONAL_SPACE - ndist) / PERSONAL_SPACE;
+                p.ax -= ndx * weight * 0.5;
+                p.ay -= ndy * weight * 0.5;
+                avg_xvel += other.vx * weight;
+                avg_yvel += other.vy * weight;
+                count += weight;
+              }
+            }
+          }
+        }
+
+        // Force 3: Alignment
+        if(count > 0) {
+          avg_xvel /= count;
+          avg_yvel /= count;
+          p.ax += (avg_xvel - p.vx) * ALIGNMENT_FACTOR;
+          p.ay += (avg_yvel - p.vy) * ALIGNMENT_FACTOR;
+        }
+
+        // Update Velocity & Position
+        p.vx += p.ax;
+        p.vy += p.ay;
+        p.vx *= FRICTION;
+        p.vy *= FRICTION;
         
-        p.vx *= friction;
-        p.vy *= friction;
-        
+        // Final velocity clamp
+        const speed = Math.sqrt(p.vx * p.vx + p.vy * p.vy);
+        if(speed > MAX_VELOCITY) {
+          p.vx = (p.vx / speed) * MAX_VELOCITY;
+          p.vy = (p.vy / speed) * MAX_VELOCITY;
+        }
+
         p.x += p.vx;
         p.y += p.vy;
 
+        // Draw
         ctx.fillStyle = p.color;
-        // Particles grow slightly as they arrive
-        const size = stride * (1 + progress * 0.5);
-        ctx.fillRect(p.x, p.y, size, size);
+        ctx.fillRect(p.x - stride/2, p.y - stride/2, stride * 1.2, stride * 1.2);
 
-        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
-          allSettled = false;
-        }
+        if (dist > 1.0 || speed > 0.1) allSettled = false;
       }
 
       frame++;
       
       if (!allSettled && frame < MAX_FRAMES) {
-        requestAnimationFrame(renderMigration);
+        requestAnimationFrame(renderSim);
       } else {
-        // 4. Final High-Res Snap (with fade-in)
+        // High-Res Snap
         const finalData = new Uint8ClampedArray(targetData.length);
         for (let r = 0; r < count; r++) {
           const srcIdx  = sortedTarget[r].index;
@@ -427,14 +491,12 @@ async function rearrangePixels() {
           finalData[destIdx * 4 + 2] = targetData[srcIdx * 4 + 2];
           finalData[destIdx * 4 + 3] = 255;
         }
-
-        // Draw the final high-res result
         ctx.putImageData(new ImageData(finalData, WORK_SIZE, WORK_SIZE), 0, 0);
         finishRearrange();
       }
     };
 
-    requestAnimationFrame(renderMigration);
+    requestAnimationFrame(renderSim);
 
   } catch (err) {
     console.error('Rearrange failed:', err);
@@ -442,6 +504,9 @@ async function rearrangePixels() {
     finishRearrange();
   }
 }
+
+// Number clamp utility
+Number.prototype.clamp = function(min, max) { return Math.min(Math.max(this, min), max); };
 
 function finishRearrange() {
   spinner.classList.add('hidden');
