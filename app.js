@@ -99,45 +99,6 @@ function computePixelMap(imageData) {
   return pixels.map(p => p.index);
 }
 
-/**
- * Apply a preset pixelMap to a target ImageData.
- *
- * How it works:
- *   - Sort the target's pixels by brightness into sortedTarget[]
- *   - The preset's pixelMap tells us "which output pixel slot i
- *     should receive the pixel ranked #i by brightness from the input".
- *   - We place sortedTarget[i] into position pixelMap[i] of the output.
- * Result: the target image's colors are spatially distributed
- * to match the preset's brightness layout.
- */
-function applyPixelMap(pixelMap, targetImageData) {
-  const { data, width, height } = targetImageData;
-  const count = width * height;
-  const out = new Uint8ClampedArray(data.length);
-
-  // Sort target pixel indices by brightness
-  const sorted = new Array(count);
-  for (let i = 0; i < count; i++) {
-    const r = data[i * 4];
-    const g = data[i * 4 + 1];
-    const b = data[i * 4 + 2];
-    sorted[i] = { index: i, lum: 0.2126 * r + 0.7152 * g + 0.0722 * b };
-  }
-  sorted.sort((a, b) => a.lum - b.lum);
-
-  // Place each ranked target pixel into the slot the preset dictates
-  for (let rank = 0; rank < count; rank++) {
-    const srcIdx  = sorted[rank].index;   // source pixel index in target
-    const destIdx = pixelMap[rank];       // destination pixel index (from preset)
-
-    out[destIdx * 4]     = data[srcIdx * 4];     // R
-    out[destIdx * 4 + 1] = data[srcIdx * 4 + 1]; // G
-    out[destIdx * 4 + 2] = data[srcIdx * 4 + 2]; // B
-    out[destIdx * 4 + 3] = data[srcIdx * 4 + 3]; // A
-  }
-
-  return new ImageData(out, width, height);
-}
 
 // ── IMAGE HELPERS ─────────────────────────────────────────────────
 /** Load an image File → returns an HTMLImageElement promise */
@@ -346,33 +307,93 @@ async function savePreset() {
 async function rearrangePixels() {
   if (!selectedPreset || !targetImageData) return;
 
-  // Show spinner
+  // Show spinner / Disable UI
   spinner.classList.remove('hidden');
-  rearrangeLabel.textContent = 'Processing…';
+  rearrangeLabel.textContent = 'Analyzing…';
   rearrangeBtn.disabled = true;
+  downloadBtn.disabled = true;
 
   await new Promise(r => setTimeout(r, 60));
 
   try {
     const pixelMap = decodePixelMap(selectedPreset.pixelMap);
-    const result   = applyPixelMap(pixelMap, targetImageData);
+    const { data: targetData, width, height } = targetImageData;
+    const count = width * height;
 
-    // Draw result to the result canvas
-    resultCanvas.width  = WORK_SIZE;
+    // 1. Sort target pixels by brightness
+    rearrangeLabel.textContent = 'Sorting…';
+    const sortedTarget = new Array(count);
+    for (let i = 0; i < count; i++) {
+      const r = targetData[i * 4];
+      const g = targetData[i * 4 + 1];
+      const b = targetData[i * 4 + 2];
+      sortedTarget[i] = { index: i, lum: 0.2126 * r + 0.7152 * g + 0.0722 * b };
+    }
+    sortedTarget.sort((a, b) => a.lum - b.lum);
+
+    // 2. Setup Canvas for animation
+    resultCanvas.width = WORK_SIZE;
     resultCanvas.height = WORK_SIZE;
-    const ctx = resultCanvas.getContext('2d');
-    ctx.putImageData(result, 0, 0);
-
+    const ctx = resultCanvas.getContext('2d', { alpha: false });
+    ctx.fillStyle = '#06070f'; // match background
+    ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
+    
     resultCard.classList.remove('hidden');
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    
+    // 3. Animation Loop (Chunked)
+    rearrangeLabel.textContent = 'Rearranging…';
+    const CHUNK_SIZE = 2048; // pixels per frame
+    let currentRank = 0;
+
+    const renderChunk = () => {
+      const end = Math.min(currentRank + CHUNK_SIZE, count);
+      const chunkBuffer = ctx.createImageData(WORK_SIZE, WORK_SIZE); // we'll use a local buffer to draw sparsely
+      
+      // We don't want to clear the canvas, just draw new pixels.
+      // Easiest way in 2D API for individual pixels is manipulating an ImageData or using fillRect.
+      // fillRect(1x1) is slow for thousands.
+      // Better: we modify the result image data directly then putImageData.
+      
+      // Get existing image data or keep a persistent buffer
+      const currentFullImageData = ctx.getImageData(0, 0, WORK_SIZE, WORK_SIZE);
+      const fullData = currentFullImageData.data;
+
+      for (let r = currentRank; r < end; r++) {
+        const srcIdx  = sortedTarget[r].index;
+        const destIdx = pixelMap[r];
+
+        fullData[destIdx * 4]     = targetData[srcIdx * 4];
+        fullData[destIdx * 4 + 1] = targetData[srcIdx * 4 + 1];
+        fullData[destIdx * 4 + 2] = targetData[srcIdx * 4 + 2];
+        fullData[destIdx * 4 + 3] = 255;
+      }
+
+      ctx.putImageData(currentFullImageData, 0, 0);
+      currentRank = end;
+
+      if (currentRank < count) {
+        requestAnimationFrame(renderChunk);
+      } else {
+        // Done
+        finishRearrange();
+      }
+    };
+
+    requestAnimationFrame(renderChunk);
+
   } catch (err) {
     console.error('Rearrange failed:', err);
     alert('Failed to process image. Please try again.');
-  } finally {
-    spinner.classList.add('hidden');
-    rearrangeLabel.textContent = '✦ Rearrange Pixels';
-    rearrangeBtn.disabled = false;
+    finishRearrange();
   }
+}
+
+function finishRearrange() {
+  spinner.classList.add('hidden');
+  rearrangeLabel.textContent = '✦ Rearrange Pixels';
+  rearrangeBtn.disabled = false;
+  downloadBtn.disabled = false;
 }
 
 // ── DOWNLOAD ──────────────────────────────────────────────────────
