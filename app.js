@@ -303,7 +303,7 @@ async function savePreset() {
   }
 }
 
-// ── REARRANGE (PARTICLE SWARM) ───────────────────────────────────
+// ── REARRANGE (ADVANCED FLUID SWARM) ────────────────────────────
 async function rearrangePixels() {
   if (!selectedPreset || !targetImageData) return;
 
@@ -331,40 +331,38 @@ async function rearrangePixels() {
     }
     sortedTarget.sort((a, b) => a.lum - b.lum);
 
-    // 2. Setup Particle System
-    // Since 512x512 = 262k pixels is TOO MANY for smooth particles in JS 2D canvas,
-    // we use a lower resolution (e.g. 128x128) for the swarm phase, 
-    // then snap to full resolution at the end.
-    const SWARM_RES = 128;
+    // 2. Setup Particle System (High Density)
+    // We use a resolution that balances density and performance
+    const SWARM_RES = 160; 
     const stride = WORK_SIZE / SWARM_RES;
     const particles = [];
 
-    rearrangeLabel.textContent = 'Initializing Swarm…';
+    rearrangeLabel.textContent = 'Simulating Swarm…';
 
     for (let y = 0; y < SWARM_RES; y++) {
       for (let x = 0; x < SWARM_RES; x++) {
-        // Source position (relative to canvas)
         const sx = x * stride;
         const sy = y * stride;
-        
-        // Find corresponding rank in sorted target
-        // We pick a representative pixel from this region
         const pixelIdx = (Math.floor(sy) * WORK_SIZE) + Math.floor(sx);
         
-        // Find which rank this pixel would have. 
-        // For simplicity in swarm mode, we just use its spatial rank as its brightness rank
-        // to approximate the "sorting" look.
+        // Find which rank this pixel matches
         const rank = Math.floor((particles.length / (SWARM_RES * SWARM_RES)) * count);
         const destIdx = pixelMap[rank];
         
         const tx = destIdx % WORK_SIZE;
         const ty = Math.floor(destIdx / WORK_SIZE);
 
+        // Initial "Burst" velocity based on distance from center
+        const cx = WORK_SIZE / 2;
+        const cy = WORK_SIZE / 2;
+        const angle = Math.atan2(sy - cy, sx - cx);
+        const mag = 5 + Math.random() * 8;
+
         particles.push({
           x: sx, y: sy,
           tx: tx, ty: ty,
-          vx: (Math.random() - 0.5) * 10,
-          vy: (Math.random() - 0.5) * 10,
+          vx: Math.cos(angle) * mag + (Math.random() - 0.5) * 5,
+          vy: Math.sin(angle) * mag + (Math.random() - 0.5) * 5,
           color: `rgb(${targetData[pixelIdx * 4]},${targetData[pixelIdx * 4 + 1]},${targetData[pixelIdx * 4 + 2]})`
         });
       }
@@ -374,31 +372,38 @@ async function rearrangePixels() {
     resultCanvas.width = WORK_SIZE;
     resultCanvas.height = WORK_SIZE;
     const ctx = resultCanvas.getContext('2d', { alpha: false });
+    ctx.fillStyle = '#06070f';
+    ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
     
     resultCard.classList.remove('hidden');
     resultCard.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
 
     let frame = 0;
-    const MAX_FRAMES = 120; // ~2 seconds
+    const MAX_FRAMES = 110; 
 
     const renderSwarm = () => {
-      ctx.fillStyle = '#06070f';
+      // Fade background for trails
+      ctx.fillStyle = 'rgba(6, 7, 15, 0.25)';
       ctx.fillRect(0, 0, WORK_SIZE, WORK_SIZE);
       
       let allSettled = true;
-      const friction = 0.85;
-      const ease = 0.12;
-      const noise = 2.0;
+      const progress = frame / MAX_FRAMES;
+      
+      // Dynamic physics constants based on progress
+      const friction = 0.88;
+      const spring   = 0.04 + (progress * 0.15); // attraction gets stronger over time
+      const noise    = Math.max(0, 4.0 * (1 - progress * 1.5)); // turbulence fades out
 
       for (let i = 0; i < particles.length; i++) {
         const p = particles[i];
         
-        // Spring physics towards target
+        // Attraction force
         const dx = p.tx - p.x;
         const dy = p.ty - p.y;
         
-        p.vx += dx * ease + (Math.random() - 0.5) * noise;
-        p.vy += dy * ease + (Math.random() - 0.5) * noise;
+        // Apply physics
+        p.vx += dx * spring + (Math.random() - 0.5) * noise;
+        p.vy += dy * spring + (Math.random() - 0.5) * noise;
         
         p.vx *= friction;
         p.vy *= friction;
@@ -406,11 +411,11 @@ async function rearrangePixels() {
         p.x += p.vx;
         p.y += p.vy;
 
-        // Visual "stream" effect: draw a line or larger pixel
+        // Draw particle
         ctx.fillStyle = p.color;
-        ctx.fillRect(p.x, p.y, stride, stride);
+        ctx.fillRect(p.x, p.y, stride * 1.5, stride * 1.5);
 
-        if (Math.abs(p.vx) > 0.1 || Math.abs(p.vy) > 0.1 || Math.abs(dx) > 1 || Math.abs(dy) > 1) {
+        if (Math.abs(dx) > 0.5 || Math.abs(dy) > 0.5) {
           allSettled = false;
         }
       }
@@ -420,7 +425,7 @@ async function rearrangePixels() {
       if (!allSettled && frame < MAX_FRAMES) {
         requestAnimationFrame(renderSwarm);
       } else {
-        // Final Snap: Draw the full resolution result
+        // Final High-Res Snap
         const finalData = new Uint8ClampedArray(targetData.length);
         for (let r = 0; r < count; r++) {
           const srcIdx  = sortedTarget[r].index;
